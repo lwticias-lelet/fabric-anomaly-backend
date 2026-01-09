@@ -35,13 +35,20 @@ async def scan_image(file: UploadFile = File(...)):
     if img is None:
         return {"error": "Erro lendo imagem enviada"}
 
-    # Agora generate_heatmap devolve: original, recon, heatmap, anomaly_score (MÁXIMO)
-    original, recon, heatmap, anomaly_score = generate_heatmap(model, img)
+    original, recon, heatmap, max_error, area_ratio = generate_heatmap(model, img)
 
-    # 🎯 limiar com base no erro máximo (entre 0 e 1)
-    THRESHOLD = 0.05  # pode ajustar depois
+    # 🎯 Regras de decisão:
+    # max_error  -> quão intenso é o defeito
+    # area_ratio -> quão grande é a região suspeita (já filtrada)
+    #
+    # Se ainda marcar tecido normal como defeito:
+    #   - aumente MAX_ERR_THRESHOLD ou AREA_THRESHOLD
+    # Se deixar passar defeito:
+    #   - diminua um dos dois.
+    MAX_ERR_THRESHOLD = 0.08    # sensibilidade à intensidade
+    AREA_THRESHOLD    = 0.003   # ~0,3% da imagem
 
-    has_defect = anomaly_score > THRESHOLD
+    has_defect = (max_error > MAX_ERR_THRESHOLD) and (area_ratio > AREA_THRESHOLD)
 
     success, heatmap_buffer = cv2.imencode(".png", heatmap)
     if not success:
@@ -52,6 +59,8 @@ async def scan_image(file: UploadFile = File(...)):
     return {
         "heatmap_base64": heatmap_base64,
         "has_defect": has_defect,
-        "anomaly_score": anomaly_score,
-        "threshold": THRESHOLD,
+        "max_error": max_error,
+        "area_ratio": area_ratio,
+        "max_error_threshold": MAX_ERR_THRESHOLD,
+        "area_threshold": AREA_THRESHOLD,
     }
