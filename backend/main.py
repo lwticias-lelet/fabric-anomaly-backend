@@ -8,7 +8,6 @@ from heatmap import generate_heatmap
 
 app = FastAPI()
 
-# CORS liberado
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,17 +20,14 @@ app.add_middleware(
 def root():
     return {"status": "Backend rodando! Use /scan para análise."}
 
-# Caminho do modelo treinado
 MODEL_PATH = "models/autoencoder_192.pth"
 model = load_model(MODEL_PATH)
 
-# 🔥 Endpoint principal
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
     if model is None:
         raise HTTPException(status_code=500, detail="Modelo não carregado no servidor.")
 
-    # Lê os bytes do arquivo enviado
     contents = await file.read()
     np_img = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
@@ -39,16 +35,14 @@ async def scan_image(file: UploadFile = File(...)):
     if img is None:
         return {"error": "Erro lendo imagem enviada"}
 
-    # Gera heatmap e score de anomalia
+    # Agora generate_heatmap devolve: original, recon, heatmap, anomaly_score (MÁXIMO)
     original, recon, heatmap, anomaly_score = generate_heatmap(model, img)
 
-    # 🎯 Limiar de decisão (threshold)
-    # Você pode ajustar esse valor testando: quanto menor, mais sensível.
-    THRESHOLD = 0.05  # 5% de erro médio
+    # 🎯 limiar com base no erro máximo (entre 0 e 1)
+    THRESHOLD = 0.05  # pode ajustar depois
 
     has_defect = anomaly_score > THRESHOLD
 
-    # Codifica o heatmap em PNG e depois em base64
     success, heatmap_buffer = cv2.imencode(".png", heatmap)
     if not success:
         return {"error": "Erro ao converter imagem para PNG"}
