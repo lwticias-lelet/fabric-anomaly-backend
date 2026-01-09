@@ -6,7 +6,7 @@ export default function App() {
   const [overlay, setOverlay] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const backendURL = "";
+  const backendURL = "https://fabric-anomaly-backend.onrender.com";
 
   useEffect(() => {
     startCamera();
