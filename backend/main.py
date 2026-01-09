@@ -1,11 +1,10 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import cv2
-import base64  # 🔥 IMPORTANTE: para gerar base64
+import base64
 from model_loader import load_model
 from heatmap import generate_heatmap
-import torch
 
 app = FastAPI()
 
@@ -18,41 +17,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Rota principal só para teste
 @app.get("/")
 def root():
     return {"status": "Backend rodando! Use /scan para análise."}
 
-# Carregar modelo treinado
+# Caminho do modelo treinado
 MODEL_PATH = "models/autoencoder_192.pth"
 model = load_model(MODEL_PATH)
 
-# Endpoint principal: recebe imagem, processa e devolve heatmap base64
+# 🔥 Endpoint principal
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
-    # Ler bytes
-    contents = await file.read()
+    if model is None:
+        raise HTTPException(status_code=500, detail="Modelo não carregado no servidor.")
 
-    # Converter para imagem
+    # Lê os bytes do arquivo enviado
+    contents = await file.read()
     np_img = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
 
     if img is None:
         return {"error": "Erro lendo imagem enviada"}
 
-    # Gerar heatmap com modelo
-    original, recon, heatmap = generate_heatmap(model, img)
+    # Gera heatmap e score de anomalia
+    original, recon, heatmap, anomaly_score = generate_heatmap(model, img)
 
-    # Codificar heatmap em PNG
+    # 🎯 Limiar de decisão (threshold)
+    # Você pode ajustar esse valor testando: quanto menor, mais sensível.
+    THRESHOLD = 0.05  # 5% de erro médio
+
+    has_defect = anomaly_score > THRESHOLD
+
+    # Codifica o heatmap em PNG e depois em base64
     success, heatmap_buffer = cv2.imencode(".png", heatmap)
-
     if not success:
         return {"error": "Erro ao converter imagem para PNG"}
 
-    # Converter para base64
     heatmap_base64 = base64.b64encode(heatmap_buffer).decode("utf-8")
 
-    # Retornar no formato que o frontend espera
     return {
-        "heatmap_base64": heatmap_base64
+        "heatmap_base64": heatmap_base64,
+        "has_defect": has_defect,
+        "anomaly_score": anomaly_score,
+        "threshold": THRESHOLD,
     }
