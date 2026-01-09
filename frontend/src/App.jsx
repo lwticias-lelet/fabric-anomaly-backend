@@ -6,7 +6,7 @@ export default function App() {
   const [overlay, setOverlay] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const backendURL = "http://127.0.0.1:8000/scan";
+  const backendURL = "";
 
   useEffect(() => {
     startCamera();
