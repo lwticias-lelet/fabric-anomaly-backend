@@ -28,9 +28,6 @@ __pycache__/
 *.tmp
 *.swp
 
-# Pesos do modelo
-*.pth
-*.pt
 
 # Pastas de build Python
 build/
