@@ -1,0 +1,88 @@
+# ===============================
+# GITIGNORE PARA PROJETO COMPLETO
+# Backend FastAPI + PyTorch
+# Frontend React + Vite
+# ===============================
+
+#################################
+# BACKEND (PYTHON / FASTAPI)
+#################################
+
+# Ambiente virtual
+venv/
+env/
+.venv/
+
+# Arquivos de cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyd
+*.pkl
+
+# Logs
+*.log
+
+# Arquivos temporários
+*.tmp
+*.swp
+
+# Pesos do modelo
+*.pth
+*.pt
+
+# Pastas de build Python
+build/
+dist/
+*.egg-info/
+
+# Configurações locais que não devem subir
+.env
+.env.*
+
+#################################
+# FRONTEND (REACT / VITE)
+#################################
+
+node_modules/
+dist/
+.cache/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Arquivos do Vite
+*.vite
+*.vite_cache/
+
+# Configurações locais do sistema
+.DS_Store
+Thumbs.db
+
+#################################
+# IMAGENS E ARQUIVOS PESADOS
+#################################
+/uploads/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+
+#################################
+# SISTEMA OPERACIONAL
+#################################
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Linux
+.Trash-*

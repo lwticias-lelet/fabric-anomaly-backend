@@ -1,0 +1,29 @@
+body {
+  margin: 0;
+  background: #111;
+  color: #fff;
+  font-family: "Inter", sans-serif;
+}
+
+.camera {
+  width: 100%;
+  height: auto;
+  transform: scaleX(-1);
+  border-radius: 12px;
+}
+
+.heatmap-overlay {
+  position: absolute;
+  top: 0;
+  width: 100%;
+  opacity: 0.7;
+  border-radius: 12px;
+}
+
+.scanner-container {
+  position: relative;
+  max-width: 420px;
+  margin: auto;
+  padding-top: 32px;
+}
+
