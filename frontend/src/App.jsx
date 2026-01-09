@@ -6,7 +6,7 @@ export default function App() {
   const [overlay, setOverlay] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const backendURL = "https://fabric-anomaly-backend.onrender.com";
+  const backendURL = "https://fabric-anomaly-backend.onrender.com/scan";
 
   useEffect(() => {
     startCamera();
