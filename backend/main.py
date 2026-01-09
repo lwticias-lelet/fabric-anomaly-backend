@@ -8,6 +8,7 @@ from heatmap import generate_heatmap
 
 app = FastAPI()
 
+# CORS liberado
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,6 +21,7 @@ app.add_middleware(
 def root():
     return {"status": "Backend rodando! Use /scan para análise."}
 
+# Caminho do modelo treinado
 MODEL_PATH = "models/autoencoder_192.pth"
 model = load_model(MODEL_PATH)
 
@@ -35,21 +37,24 @@ async def scan_image(file: UploadFile = File(...)):
     if img is None:
         return {"error": "Erro lendo imagem enviada"}
 
+    # original, recon, heatmap, max_error, area_ratio vindo do heatmap.py
     original, recon, heatmap, max_error, area_ratio = generate_heatmap(model, img)
 
-    # 🎯 Regras de decisão:
-    # max_error  -> quão intenso é o defeito
-    # area_ratio -> quão grande é a região suspeita (já filtrada)
+    # 🎯 Limiares MAIS SENSÍVEIS
+    # max_error  -> intensidade máxima do defeito (0–1 aprox.)
+    # area_ratio -> fração da imagem marcada como suspeita (0–1)
     #
     # Se ainda marcar tecido normal como defeito:
-    #   - aumente MAX_ERR_THRESHOLD ou AREA_THRESHOLD
-    # Se deixar passar defeito:
+    #   - aumente um pouco MAX_ERR_THRESHOLD ou AREA_THRESHOLD
+    # Se continuar deixando passar defeito:
     #   - diminua um dos dois.
-    MAX_ERR_THRESHOLD = 0.08    # sensibilidade à intensidade
-    AREA_THRESHOLD    = 0.003   # ~0,3% da imagem
+    MAX_ERR_THRESHOLD = 0.04    # estava muito alto; deixamos mais sensível
+    AREA_THRESHOLD    = 0.001   # ~0,1% da imagem
 
-    has_defect = (max_error > MAX_ERR_THRESHOLD) and (area_ratio > AREA_THRESHOLD)
+    # ✅ Agora, basta UMA das condições ser verdadeira para considerar defeito
+    has_defect = (max_error > MAX_ERR_THRESHOLD) or (area_ratio > AREA_THRESHOLD)
 
+    # Codifica overlay (heatmap + retângulos) em PNG/base64
     success, heatmap_buffer = cv2.imencode(".png", heatmap)
     if not success:
         return {"error": "Erro ao converter imagem para PNG"}
