@@ -43,22 +43,24 @@ async def scan_image(file: UploadFile = File(...)):
     # overlay = heatmap + retângulos / max_error / area_ratio
     original, recon, overlay, max_error, area_ratio = generate_heatmap(model, img)
 
-    # 🎯 Regras de decisão:
-    # - max_error: intensidade da anomalia (0–1 aprox.)
-    # - area_ratio: fração da imagem que passou na máscara
-    #
-    # Ideia:
-    #   Só considerar defeito se:
-    #   1) houver um erro bem alto
-    #   2) e a região suspeita ocupar uma área mínima
-    #
-    # Ajuste fino:
-    #   - se marcar tecido normal como defeito -> aumentar um pouco
-    #   - se deixar passar defeito -> diminuir um pouco
-    MAX_ERR_THRESHOLD = 0.10     # erro máximo mínimo pra chamar de defeito
-    AREA_THRESHOLD    = 0.002    # ~0,2% da imagem
+    # 🎯 REGRAS DE DECISÃO OTIMIZADAS
+    # Foco: Detectar defeitos REAIS (pequenos/intensos ou grandes/sutis)
+    # e evitar falsos positivos em tecidos uniformes.
+    MAX_ERR_THRESHOLD = 0.08      # Reduzido: captura defeitos intensos
+    AREA_THRESHOLD = 0.0015       # Ajustado: captura defeitos pequenos, mas ignora ruído
 
-    has_defect = (max_error > MAX_ERR_THRESHOLD) and (area_ratio > AREA_THRESHOLD)
+    # LÓGICA PRINCIPAL CORRIGIDA: "OU" em vez de "E"
+    # Um defeito PODE ser: muito intenso (alta diferença) OU cobrir uma área significativa.
+    has_defect = (max_error > MAX_ERR_THRESHOLD) or (area_ratio > AREA_THRESHOLD)
+
+    # Pós-processamento da imagem final: Adiciona um TEXTO CLARO com o resultado
+    # Define a cor do texto: VERDE para "OK", VERMELHO para "DEFEITO"
+    text_color = (0, 255, 0) if not has_defect else (0, 0, 255)
+    result_text = "SEM DEFEITO" if not has_defect else "DEFEITO DETECTADO"
+
+    # Adiciona o texto na parte superior da imagem de resultado (overlay)
+    cv2.putText(overlay, result_text, (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2)
 
     # Codifica overlay em PNG/base64
     success, heatmap_buffer = cv2.imencode(".png", overlay)
@@ -70,8 +72,8 @@ async def scan_image(file: UploadFile = File(...)):
     return {
         "heatmap_base64": heatmap_base64,
         "has_defect": has_defect,
-        "max_error": max_error,
-        "area_ratio": area_ratio,
+        "max_error": float(max_error),
+        "area_ratio": float(area_ratio),
         "max_error_threshold": MAX_ERR_THRESHOLD,
         "area_threshold": AREA_THRESHOLD,
     }
