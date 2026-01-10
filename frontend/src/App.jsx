@@ -1,8 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import "./styles.css";
- 
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
+// URL FIXA DO BACKEND (RENDER)
+const BACKEND_SCAN_URL =
+  "https://fabric-anomaly-backend.onrender.com/scan";
+
+const BACKEND_WAKE_URL =
+  "https://fabric-anomaly-backend.onrender.com";
 
 export default function App() {
   const videoRef = useRef(null);
@@ -12,10 +16,10 @@ export default function App() {
   const [loading, setLoading] = useState(false);
 
   // =========================
-  // Wake-up do backend (NÃO AFETA ESTÉTICA)
+  // Wake-up do backend
   // =========================
   useEffect(() => {
-    fetch(BACKEND_URL).catch(() => {});
+    fetch(BACKEND_WAKE_URL).catch(() => {});
     startCamera();
   }, []);
 
@@ -51,14 +55,20 @@ export default function App() {
     formData.append("file", blob, "image.jpg");
 
     try {
-      const response = await fetch(`${BACKEND_URL}/scan`, {
+      const response = await fetch(BACKEND_SCAN_URL, {
         method: "POST",
         body: formData,
       });
 
+      if (!response.ok) {
+        throw new Error("Erro HTTP: " + response.status);
+      }
+
       const data = await response.json();
+
       setResultImage(`data:image/png;base64,${data.heatmap_base64}`);
     } catch (error) {
+      console.error(error);
       alert("Erro ao comunicar com o backend");
     }
 
