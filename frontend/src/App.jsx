@@ -1,14 +1,20 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import "./App.css"; // ⬅️ SEU CSS ANTIGO, NÃO ALTERADO
+
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
 export default function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+
   const [resultImage, setResultImage] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const backendURL = "https://fabric-anomaly-backend.onrender.com/scan";
-
+  // =========================
+  // Wake-up do backend (NÃO AFETA ESTÉTICA)
+  // =========================
   useEffect(() => {
+    fetch(BACKEND_URL).catch(() => {});
     startCamera();
   }, []);
 
@@ -16,11 +22,11 @@ export default function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
-        audio: false
+        audio: false,
       });
       videoRef.current.srcObject = stream;
-    } catch (error) {
-      alert("Erro ao acessar câmera: " + error.message);
+    } catch (err) {
+      alert("Erro ao acessar a câmera");
     }
   };
 
@@ -41,44 +47,59 @@ export default function App() {
     );
 
     const formData = new FormData();
-    formData.append("file", blob, "frame.jpg");
+    formData.append("file", blob, "image.jpg");
 
     try {
-      const response = await fetch(backendURL, {
+      const response = await fetch(`${BACKEND_URL}/scan`, {
         method: "POST",
-        body: formData
+        body: formData,
       });
 
       const data = await response.json();
-
-      if (data.image_base64) {
-        setResultImage(`data:image/jpeg;base64,${data.image_base64}`);
-      }
-    } catch (err) {
-      alert("Erro ao enviar imagem: " + err.message);
+      setResultImage(`data:image/png;base64,${data.heatmap_base64}`);
+    } catch (error) {
+      alert("Erro ao comunicar com o backend");
     }
 
     setLoading(false);
   };
 
   return (
-    <div className="container">
-      <h1>Fabric Anomaly Scanner</h1>
+    <div className="app-container">
+      <header className="header">
+        <h1>Surface Anomaly Scanner</h1>
+      </header>
 
-      <video ref={videoRef} autoPlay playsInline className="camera" />
-
-      <button onClick={captureFrame} disabled={loading}>
-        {loading ? "Processando..." : "SCANEAR TECIDO"}
-      </button>
-
-      <canvas ref={canvasRef} style={{ display: "none" }} />
-
-      {resultImage && (
-        <div className="heatmap-container">
-          <h2>Resultado</h2>
-          <img src={resultImage} alt="Resultado" className="heatmap" />
+      <main className="main-content">
+        <div className="camera-container">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            className="camera-view"
+          />
         </div>
-      )}
+
+        <button
+          className="capture-btn"
+          onClick={captureFrame}
+          disabled={loading}
+        >
+          {loading ? "Processando..." : "Detectar Defeito"}
+        </button>
+
+        <canvas ref={canvasRef} className="hidden-canvas" />
+
+        {resultImage && (
+          <div className="result-container">
+            <img
+              src={resultImage}
+              alt="Resultado da detecção"
+              className="result-image"
+            />
+          </div>
+        )}
+      </main>
     </div>
   );
 }
