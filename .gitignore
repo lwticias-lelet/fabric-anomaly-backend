@@ -83,3 +83,12 @@ desktop.ini
 
 # Linux
 .Trash-*
+
+# ==== YOLO ====
+runs/
+*.onnx
+*.engine
+*.mlmodel
+
+# NÃO IGNORAR O MODELO TREINADO
+!backend/models/best.pt

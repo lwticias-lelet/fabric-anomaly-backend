@@ -1,14 +1,13 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import numpy as np
+from ultralytics import YOLO
 import cv2
+import numpy as np
 import base64
-from model_loader import load_model
-from heatmap import generate_heatmap
 
 app = FastAPI()
 
-# CORS liberado (front na Vercel, backend no Render)
+# CORS liberado porque frontend pode estar na Vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,63 +16,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -----------------------
+#   Carregar modelo YOLO
+# -----------------------
+MODEL_PATH = "models/best.pt"
+
+try:
+    model = YOLO(MODEL_PATH)
+except Exception as e:
+    model = None
+    print("Erro ao carregar modelo:", e)
+
 
 @app.get("/")
 def root():
-    return {"status": "Backend rodando! Use /scan para análise."}
+    return {"status": "Backend rodando! Envie imagem para /scan"}
 
 
-# Carrega modelo treinado
-MODEL_PATH = "models/autoencoder_192.pth"
-model = load_model(MODEL_PATH)
-
-
+# -----------------------
+#     ROTA DE SCAN
+# -----------------------
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
     if model is None:
-        raise HTTPException(status_code=500, detail="Modelo não carregado no servidor.")
+        raise HTTPException(status_code=500, detail="Modelo não carregado")
 
+    # Ler bytes da imagem
     contents = await file.read()
     np_img = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
+    frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-    if img is None:
-        return {"error": "Erro lendo imagem enviada"}
+    if frame is None:
+        return {"error": "Erro lendo imagem"}
 
-    # overlay = heatmap + retângulos / max_error / area_ratio
-    original, recon, overlay, max_error, area_ratio = generate_heatmap(model, img)
+    # Executar YOLO
+    results = model(frame, conf=0.35)  # confiança ajustável
 
-    # 🎯 REGRAS DE DECISÃO OTIMIZADAS
-    # Foco: Detectar defeitos REAIS (pequenos/intensos ou grandes/sutis)
-    # e evitar falsos positivos em tecidos uniformes.
-    MAX_ERR_THRESHOLD = 0.08      # Reduzido: captura defeitos intensos
-    AREA_THRESHOLD = 0.0015       # Ajustado: captura defeitos pequenos, mas ignora ruído
+    # Copiar imagem para desenhar overlay
+    output = frame.copy()
+    has_defect = False
+    boxes_output = []
 
-    # LÓGICA PRINCIPAL CORRIGIDA: "OU" em vez de "E"
-    # Um defeito PODE ser: muito intenso (alta diferença) OU cobrir uma área significativa.
-    has_defect = (max_error > MAX_ERR_THRESHOLD) or (area_ratio > AREA_THRESHOLD)
+    # Processar detecções
+    for r in results:
+        if not r.boxes:
+            continue
 
-    # Pós-processamento da imagem final: Adiciona um TEXTO CLARO com o resultado
-    # Define a cor do texto: VERDE para "OK", VERMELHO para "DEFEITO"
-    text_color = (0, 255, 0) if not has_defect else (0, 0, 255)
-    result_text = "SEM DEFEITO" if not has_defect else "DEFEITO DETECTADO"
+        for box in r.boxes:
+            has_defect = True
 
-    # Adiciona o texto na parte superior da imagem de resultado (overlay)
-    cv2.putText(overlay, result_text, (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2)
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+            conf = float(box.conf[0].cpu().numpy())
 
-    # Codifica overlay em PNG/base64
-    success, heatmap_buffer = cv2.imencode(".png", overlay)
-    if not success:
-        return {"error": "Erro ao converter imagem para PNG"}
+            # Desenhar retângulo vermelho
+            cv2.rectangle(output, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-    heatmap_base64 = base64.b64encode(heatmap_buffer).decode("utf-8")
+            # Texto "DEFEITO"
+            cv2.putText(output, "DEFEITO", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+            # Guardar box
+            boxes_output.append({
+                "x1": int(x1),
+                "y1": int(y1),
+                "x2": int(x2),
+                "y2": int(y2),
+                "confidence": conf
+            })
+
+    # Texto principal no topo
+    label = "DEFEITO DETECTADO" if has_defect else "SEM DEFEITO"
+    color = (0, 0, 255) if has_defect else (0, 255, 0)
+
+    cv2.putText(output, label, (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 3)
+
+    # Converter imagem com overlay para Base64
+    success, buffer = cv2.imencode(".jpg", output)
+    heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
 
     return {
-        "heatmap_base64": heatmap_base64,
         "has_defect": has_defect,
-        "max_error": float(max_error),
-        "area_ratio": float(area_ratio),
-        "max_error_threshold": MAX_ERR_THRESHOLD,
-        "area_threshold": AREA_THRESHOLD,
+        "boxes": boxes_output,
+        "image_base64": heatmap_base64
     }
