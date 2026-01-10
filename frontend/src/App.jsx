@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import "./App.css"; // ⬅️ SEU CSS ANTIGO, NÃO ALTERADO
+import "./styles.css";
+ 
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
