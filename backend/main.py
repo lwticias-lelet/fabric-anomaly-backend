@@ -1,146 +1,140 @@
-# backend/main.py
-
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from ultralytics import YOLO
-
-import numpy as np
+import torch
 import cv2
+import numpy as np
 import base64
+from io import BytesIO
+from PIL import Image
 import os
 
 app = FastAPI()
 
-# Libera o CORS (Vercel no front, Render no back)
+# CORS: libera para seu frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # se quiser, depois restringe ao domínio da Vercel
+    allow_origins=["*"],  # pode restringir pro domínio da Vercel depois
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Caminho do modelo YOLO treinado
-MODEL_PATH = os.path.join("models", "best.pt")
+# ==============================
+# CARREGAR MODELO UMA ÚNICA VEZ
+# ==============================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 
-# Carrega o modelo YOLO na memória
-try:
-    print(f"Carregando modelo YOLO em: {MODEL_PATH}")
-    yolo_model = YOLO(MODEL_PATH)
-    print("Modelo YOLO carregado com sucesso.")
-except Exception as e:
-    print("Erro ao carregar modelo YOLO:", e)
-    yolo_model = None
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Carregando modelo YOLO em {device}...")
+model = YOLO(MODEL_PATH)
+# não é obrigatório chamar .to(), podemos passar device na inferência
 
 
-@app.get("/")
-def root():
-    return {"status": "Backend rodando com YOLO. Use POST /scan para analisar."}
+def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
+    """Converte PIL -> OpenCV (BGR)."""
+    rgb = np.array(pil_image.convert("RGB"))
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    return bgr
+
+
+def cv2_to_base64(img_bgr: np.ndarray) -> str:
+    """Converte imagem OpenCV (BGR) em JPEG base64."""
+    _, buffer = cv2.imencode(".jpg", img_bgr)
+    return base64.b64encode(buffer).decode("utf-8")
 
 
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
-    """
-    Recebe uma imagem (arquivo), roda YOLO em cima,
-    desenha bounding boxes vermelhos nos defeitos
-    e devolve a imagem final em base64 + flag has_defect.
-    """
-    if yolo_model is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Modelo YOLO não carregado no servidor."
+    try:
+        # ==========
+        # 1) LER IMAGEM
+        # ==========
+        contents = await file.read()
+        pil_img = Image.open(BytesIO(contents)).convert("RGB")
+        img_bgr = pil_to_cv2(pil_img)
+
+        # ==========
+        # 2) INFERÊNCIA YOLO (rápida e enxuta)
+        # ==========
+        # imgsz 640 combina com seu treino
+        results = model(
+            img_bgr,
+            imgsz=640,
+            conf=0.35,      # limiar de confiança
+            iou=0.45,
+            device=device,
+            verbose=False
         )
 
-    # Lê bytes da imagem enviada
-    contents = await file.read()
-    np_img = np.frombuffer(contents, np.uint8)
+        result = results[0]
+        boxes = result.boxes
 
-    # Decodifica para BGR (colorida)
-    img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-    if img is None:
-        raise HTTPException(status_code=400, detail="Não foi possível ler a imagem enviada.")
+        has_defect = len(boxes) > 0
 
-    # Faz uma cópia para desenhar por cima
-    overlay = img.copy()
+        # ==========
+        # 3) DESENHAR BOUNDING BOXES (retângulo vermelho bonito)
+        # ==========
+        overlay = img_bgr.copy()
 
-    # Roda inferência com YOLO
-    # conf pode ser ajustado (0.25–0.4) para mais/menos sensibilidade
-    results = yolo_model(overlay, conf=0.35, iou=0.45, verbose=False)
-    r = results[0]
-    boxes = r.boxes
+        if has_defect:
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                conf = float(box.conf[0])
 
-    has_defect = boxes is not None and len(boxes) > 0
+                pt1 = (int(x1), int(y1))
+                pt2 = (int(x2), int(y2))
 
-    # Se houver detecções, desenha retângulos vermelhos
-    if has_defect:
-        for box in boxes:
-            # coordenadas do bounding box
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                # retângulo vermelho com espessura 3
+                cv2.rectangle(overlay, pt1, pt2, (0, 0, 255), 3)
 
-            # confiança
-            conf = float(box.conf[0].cpu().numpy())
+                # opcional: texto "Defeito"
+                label = f"Defeito ({conf:.2f})"
+                cv2.putText(
+                    overlay,
+                    label,
+                    (pt1[0], max(pt1[1] - 10, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA
+                )
 
-            # Desenha retângulo vermelho
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-            # Label "DEFEITO" + confiança
-            label = f"DEFEITO {conf:.2f}"
-            (tw, th), baseline = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-            )
-
-            # Caixa sólida por trás do texto
-            cv2.rectangle(
-                overlay,
-                (x1, max(0, y1 - th - baseline)),
-                (x1 + tw, y1),
-                (0, 0, 255),
-                thickness=-1,
-            )
-
-            # Texto em branco
+            message = "Defeito detectado no tecido."
+        else:
+            message = "Nenhum defeito detectado."
+            # opcional: borda verde em volta da imagem inteira
+            h, w = overlay.shape[:2]
+            cv2.rectangle(overlay, (10, 10), (w - 10, h - 10), (0, 255, 0), 3)
             cv2.putText(
                 overlay,
-                label,
-                (x1, y1 - baseline),
+                "SEM DEFEITO",
+                (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
+                1.0,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA
             )
 
-        status_text = "DEFEITO DETECTADO"
-        status_color = (0, 0, 255)  # vermelho
-    else:
-        status_text = "SEM DEFEITO"
-        status_color = (0, 255, 0)  # verde
+        # ==========
+        # 4) CONVERTER PARA BASE64 E RETORNAR
+        # ==========
+        image_base64 = cv2_to_base64(overlay)
 
-    # Escreve o status na parte superior da imagem
-    cv2.putText(
-        overlay,
-        status_text,
-        (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        status_color,
-        2,
-        cv2.LINE_AA,
-    )
-
-    # Codifica overlay em PNG -> base64
-    success, buffer = cv2.imencode(".png", overlay)
-    if not success:
-        raise HTTPException(
-            status_code=500,
-            detail="Erro ao converter imagem processada para PNG."
+        return JSONResponse(
+            {
+                "has_defect": has_defect,
+                "message": message,
+                "image_base64": image_base64,
+            }
         )
 
-    heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
-
-    # Mantendo a mesma "shape" de resposta do backend antigo
-    return {
-        "heatmap_base64": heatmap_base64,  # agora é a imagem com bounding boxes
-        "has_defect": has_defect,
-        "num_boxes": int(len(boxes)) if boxes is not None else 0,
-    }
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )
