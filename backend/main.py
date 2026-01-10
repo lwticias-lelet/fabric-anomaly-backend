@@ -1,102 +1,146 @@
+# backend/main.py
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
-import cv2
+
 import numpy as np
+import cv2
 import base64
+import os
 
 app = FastAPI()
 
-# CORS liberado porque frontend pode estar na Vercel
+# Libera o CORS (Vercel no front, Render no back)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # se quiser, depois restringe ao domínio da Vercel
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------
-#   Carregar modelo YOLO
-# -----------------------
-MODEL_PATH = "models/best.pt"
+# Caminho do modelo YOLO treinado
+MODEL_PATH = os.path.join("models", "best.pt")
 
+# Carrega o modelo YOLO na memória
 try:
-    model = YOLO(MODEL_PATH)
+    print(f"Carregando modelo YOLO em: {MODEL_PATH}")
+    yolo_model = YOLO(MODEL_PATH)
+    print("Modelo YOLO carregado com sucesso.")
 except Exception as e:
-    model = None
-    print("Erro ao carregar modelo:", e)
+    print("Erro ao carregar modelo YOLO:", e)
+    yolo_model = None
 
 
 @app.get("/")
 def root():
-    return {"status": "Backend rodando! Envie imagem para /scan"}
+    return {"status": "Backend rodando com YOLO. Use POST /scan para analisar."}
 
 
-# -----------------------
-#     ROTA DE SCAN
-# -----------------------
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
-    if model is None:
-        raise HTTPException(status_code=500, detail="Modelo não carregado")
+    """
+    Recebe uma imagem (arquivo), roda YOLO em cima,
+    desenha bounding boxes vermelhos nos defeitos
+    e devolve a imagem final em base64 + flag has_defect.
+    """
+    if yolo_model is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Modelo YOLO não carregado no servidor."
+        )
 
-    # Ler bytes da imagem
+    # Lê bytes da imagem enviada
     contents = await file.read()
     np_img = np.frombuffer(contents, np.uint8)
-    frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-    if frame is None:
-        return {"error": "Erro lendo imagem"}
+    # Decodifica para BGR (colorida)
+    img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Não foi possível ler a imagem enviada.")
 
-    # Executar YOLO
-    results = model(frame, conf=0.35)  # confiança ajustável
+    # Faz uma cópia para desenhar por cima
+    overlay = img.copy()
 
-    # Copiar imagem para desenhar overlay
-    output = frame.copy()
-    has_defect = False
-    boxes_output = []
+    # Roda inferência com YOLO
+    # conf pode ser ajustado (0.25–0.4) para mais/menos sensibilidade
+    results = yolo_model(overlay, conf=0.35, iou=0.45, verbose=False)
+    r = results[0]
+    boxes = r.boxes
 
-    # Processar detecções
-    for r in results:
-        if not r.boxes:
-            continue
+    has_defect = boxes is not None and len(boxes) > 0
 
-        for box in r.boxes:
-            has_defect = True
-
+    # Se houver detecções, desenha retângulos vermelhos
+    if has_defect:
+        for box in boxes:
+            # coordenadas do bounding box
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+
+            # confiança
             conf = float(box.conf[0].cpu().numpy())
 
-            # Desenhar retângulo vermelho
-            cv2.rectangle(output, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            # Desenha retângulo vermelho
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-            # Texto "DEFEITO"
-            cv2.putText(output, "DEFEITO", (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            # Label "DEFEITO" + confiança
+            label = f"DEFEITO {conf:.2f}"
+            (tw, th), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+            )
 
-            # Guardar box
-            boxes_output.append({
-                "x1": int(x1),
-                "y1": int(y1),
-                "x2": int(x2),
-                "y2": int(y2),
-                "confidence": conf
-            })
+            # Caixa sólida por trás do texto
+            cv2.rectangle(
+                overlay,
+                (x1, max(0, y1 - th - baseline)),
+                (x1 + tw, y1),
+                (0, 0, 255),
+                thickness=-1,
+            )
 
-    # Texto principal no topo
-    label = "DEFEITO DETECTADO" if has_defect else "SEM DEFEITO"
-    color = (0, 0, 255) if has_defect else (0, 255, 0)
+            # Texto em branco
+            cv2.putText(
+                overlay,
+                label,
+                (x1, y1 - baseline),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
-    cv2.putText(output, label, (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 3)
+        status_text = "DEFEITO DETECTADO"
+        status_color = (0, 0, 255)  # vermelho
+    else:
+        status_text = "SEM DEFEITO"
+        status_color = (0, 255, 0)  # verde
 
-    # Converter imagem com overlay para Base64
-    success, buffer = cv2.imencode(".jpg", output)
+    # Escreve o status na parte superior da imagem
+    cv2.putText(
+        overlay,
+        status_text,
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        status_color,
+        2,
+        cv2.LINE_AA,
+    )
+
+    # Codifica overlay em PNG -> base64
+    success, buffer = cv2.imencode(".png", overlay)
+    if not success:
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao converter imagem processada para PNG."
+        )
+
     heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
 
+    # Mantendo a mesma "shape" de resposta do backend antigo
     return {
+        "heatmap_base64": heatmap_base64,  # agora é a imagem com bounding boxes
         "has_defect": has_defect,
-        "boxes": boxes_output,
-        "image_base64": heatmap_base64
+        "num_boxes": int(len(boxes)) if boxes is not None else 0,
     }
