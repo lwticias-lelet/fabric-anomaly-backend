@@ -1,189 +1,180 @@
-import os
+# backend/main.py
+
 import io
+import os
 import base64
+from typing import Tuple
 
 import cv2
 import numpy as np
-from PIL import Image
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from PIL import Image
 from ultralytics import YOLO
 
-# ============================================================
-# CONFIGURAÇÃO DA API
-# ============================================================
+# ================================
+# CONFIGURAÇÃO DO MODELO YOLO
+# ================================
 
-app = FastAPI(title="Fabric Anomaly Scanner - YOLOv8")
+# Caminho relativo ao backend/
+MODEL_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "models",
+    "best.pt"
+)
 
-# CORS liberado (pode depois restringir para o domínio do Vercel)
+DEVICE = "cpu"
+
+print(f"Carregando modelo YOLO em {DEVICE} a partir de {MODEL_PATH}...")
+
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(f"Arquivo de modelo não encontrado em: {MODEL_PATH}")
+
+model = YOLO(MODEL_PATH)
+model.to(DEVICE)
+
+# ================================
+# FASTAPI APP
+# ================================
+
+app = FastAPI(title="Fabric Anomaly Scanner - YOLO")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # em produção você pode restringir
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Caminho do modelo
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
-MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
-
-DEVICE = "cpu"
-
-print(f"Carregando modelo em {DEVICE} a partir de {MODEL_PATH}...")
-model = YOLO(MODEL_PATH)
-print("✅ Modelo YOLO carregado com sucesso!")
-
-
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
-
-def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
-    """Converte PIL (RGB) para OpenCV (BGR)."""
-    arr = np.array(pil_image)
-    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-
-
-def cv2_to_base64(img_bgr: np.ndarray) -> str:
-    """Converte imagem OpenCV (BGR) em base64 (JPEG)."""
-    _, buffer = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    img_bytes = buffer.tobytes()
-    return base64.b64encode(img_bytes).decode("utf-8")
-
-
-# ============================================================
-# ROTAS
-# ============================================================
 
 @app.get("/")
 async def root():
-    """Rota raiz – só pra quando você abrir o link no navegador não dar 404."""
+    """
+    Rota raiz, usada pelo Render/Vercel para testar se o serviço está no ar.
+    """
     return {
         "status": "ok",
-        "message": "Backend Fabric Anomaly Scanner rodando. Use /health ou POST /scan."
+        "message": "Backend Fabric Anomaly Scanner (YOLO) rodando. Use /health ou POST /scan."
     }
 
 
 @app.get("/health")
 async def health():
-    """Health check simples (usado pelo Render/Vercel)."""
+    """
+    Endpoint simples de saúde da aplicação.
+    """
     return {"status": "ok"}
 
 
-@app.post("/scan")
-async def scan_image(file: UploadFile = File(...)):
+# ================================
+# FUNÇÃO AUXILIAR DE INFERÊNCIA
+# ================================
+
+def run_inference(image_bytes: bytes) -> Tuple[bool, str]:
     """
-    Recebe uma imagem, roda YOLOv8 e:
-
-    - Se encontrar qualquer bounding box -> has_defect = True
-    - Se não encontrar -> has_defect = False
-
-    Retorno:
+    Roda o modelo YOLO na imagem enviada e devolve:
       - has_defect: bool
-      - message: str
-      - image_base64: imagem com overlay (retângulo vermelho ou moldura verde)
+      - image_b64: imagem anotada (com bounding boxes) em base64
     """
-    try:
-        # -------------------------
-        # 1) Ler imagem enviada
-        # -------------------------
-        contents = await file.read()
-        pil_img = Image.open(io.BytesIO(contents)).convert("RGB")
-        img_bgr = pil_to_cv2(pil_img)
 
-        # -------------------------
-        # 2) Rodar YOLO
-        # -------------------------
-        results = model.predict(
-            source=img_bgr,
-            imgsz=640,
-            conf=0.25,      # pode ajustar depois (0.1 - 0.3 se estiver muito cego)
-            iou=0.45,
-            device=DEVICE,
-            verbose=False,
-        )
+    # Abrir imagem com PIL
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img_np = np.array(image)  # RGB
 
-        result = results[0]
-        boxes = result.boxes
-        overlay = img_bgr.copy()
+    # Copiar para desenhar overlays usando OpenCV (BGR)
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-        has_defect = False
+    # Rodar YOLO
+    results = model(
+        img_np,
+        imgsz=640,
+        conf=0.35,       # limiar de confiança
+        verbose=False
+    )
 
-        if boxes is not None and len(boxes) > 0:
-            has_defect = True
+    result = results[0]
+    boxes = result.boxes
 
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                conf = float(box.conf[0])
+    has_defect = False
 
-                pt1 = (int(x1), int(y1))
-                pt2 = (int(x2), int(y2))
+    if boxes is not None and len(boxes) > 0:
+        has_defect = True
 
-                # Retângulo vermelho
-                cv2.rectangle(overlay, pt1, pt2, (0, 0, 255), 3)
+        for box in boxes:
+            # Coordenadas da caixa
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            conf = float(box.conf[0])
 
-                label = f"Defeito ({conf:.2f})"
-                cv2.putText(
-                    overlay,
-                    label,
-                    (pt1[0], max(pt1[1] - 10, 0)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-            message = "Defeito detectado no tecido."
-        else:
-            has_defect = False
-            message = "Nenhum defeito detectado no tecido."
-
-            h, w = overlay.shape[:2]
-            cv2.rectangle(overlay, (10, 10), (w - 10, h - 10), (0, 255, 0), 3)
-            cv2.putText(
-                overlay,
-                "SEM DEFEITO",
-                (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
+            # Desenhar retângulo vermelho
+            cv2.rectangle(
+                img_bgr,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                (0, 0, 255),    # BGR (vermelho)
+                3               # espessura
             )
 
-        # -------------------------
-        # 3) Converter para base64
-        # -------------------------
-        img_b64 = cv2_to_base64(overlay)
+            # Opcional: escrever confiança acima da caixa
+            label = f"{conf:.2f}"
+            cv2.putText(
+                img_bgr,
+                label,
+                (int(x1), max(int(y1) - 10, 0)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA
+            )
 
-        return JSONResponse(
-            {
-                "has_defect": has_defect,
-                "message": message,
-                "image_base64": img_b64,
-            }
-        )
+    # Converter de volta para RGB antes de salvar
+    img_rgb_out = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pil_out = Image.fromarray(img_rgb_out)
+
+    # Converter para JPEG em memória
+    buffer = io.BytesIO()
+    pil_out.save(buffer, format="JPEG")
+    buffer.seek(0)
+    img_bytes = buffer.read()
+
+    # Converter para base64
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    return has_defect, img_b64
+
+
+# ================================
+# ENDPOINT PRINCIPAL /scan
+# ================================
+
+@app.post("/scan")
+async def scan(file: UploadFile = File(...)):
+    """
+    Recebe uma imagem (frame da câmera), roda YOLO e devolve:
+      - has_defect: bool
+      - message: texto em PT-BR
+      - image_base64: imagem anotada (com retângulos vermelhos)
+    """
+    try:
+        content = await file.read()
+        has_defect, img_b64 = run_inference(content)
+
+        if has_defect:
+            msg = "Defeito detectado no tecido."
+        else:
+            msg = "Nenhum defeito visível detectado."
+
+        return {
+            "has_defect": has_defect,
+            "message": msg,
+            "image_base64": img_b64
+        }
 
     except Exception as e:
-        print("Erro em /scan:", e)
-        return JSONResponse(
-            {"error": str(e)},
-            status_code=500,
-        )
-
-
-# ============================================================
-# RODAR LOCALMENTE
-# ============================================================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        reload=True,
-    )
+        # Em produção você pode logar o erro
+        return {
+            "has_defect": False,
+            "message": f"Erro ao processar imagem: {str(e)}",
+            "image_base64": None
+        }
