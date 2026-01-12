@@ -1,100 +1,140 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from ultralytics import YOLO
-import numpy as np
+import torch
 import cv2
+import numpy as np
+from io import BytesIO
+from PIL import Image
 import base64
+import os
 
-# =========================
-# Inicialização
-# =========================
 app = FastAPI()
 
-# =========================
-# CORS (produção + local)
-# =========================
+# =======================
+# CORS – libera pro frontend
+# =======================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://SEU_FRONT.vercel.app",  # ⬅️ troque pelo domínio real
-        "http://localhost:5173"
-    ],
+    allow_origins=["*"],  # depois você pode limitar pro domínio da Vercel
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =========================
-# Wake-up do Render
-# =========================
-@app.get("/")
-def root():
-    return {"status": "backend ativo"}
+# =======================
+# HEALTH CHECK (teste rápido)
+# =======================
+@app.get("/health")
+async def health():
+    return {"status": "ok", "message": "Backend vivo e respondendo."}
 
-# =========================
-# Carrega modelo YOLO
-# =========================
-model = YOLO("best.pt")  # garanta que este arquivo está no backend
+# =======================
+# CARREGAR MODELO UMA VEZ
+# =======================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 
-# =========================
-# Endpoint de detecção
-# =========================
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Carregando modelo em {device} a partir de {MODEL_PATH}...")
+
+model = YOLO(MODEL_PATH)  # YOLO v8
+# vamos passar `device` na inferência, não precisa .to()
+
+def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
+    """PIL -> OpenCV BGR."""
+    rgb = np.array(pil_image.convert("RGB"))
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    return bgr
+
+def cv2_to_base64(img_bgr: np.ndarray) -> str:
+    """OpenCV BGR -> JPEG base64."""
+    ok, buffer = cv2.imencode(".jpg", img_bgr)
+    if not ok:
+        raise RuntimeError("Falha ao codificar imagem em JPEG.")
+    return base64.b64encode(buffer).decode("utf-8")
+
+
 @app.post("/scan")
-async def scan(file: UploadFile = File(...)):
+async def scan_image(file: UploadFile = File(...)):
     try:
-        # Ler imagem enviada
+        # 1) Ler imagem enviada
         contents = await file.read()
-        np_img = np.frombuffer(contents, np.uint8)
-        image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        pil_img = Image.open(BytesIO(contents)).convert("RGB")
+        img_bgr = pil_to_cv2(pil_img)
 
-        if image is None:
-            raise HTTPException(status_code=400, detail="Imagem inválida")
-
-        # Inferência com parâmetros controlados
+        # 2) Rodar YOLO
         results = model(
-            image,
-            conf=0.25,   # confiança mínima do modelo
-            iou=0.45
-        )[0]
+            img_bgr,
+            imgsz=640,
+            conf=0.35,
+            iou=0.45,
+            device=device,
+            verbose=False
+        )
 
-        has_defect = False
-        valid_boxes = []
+        result = results[0]
+        boxes = result.boxes
+        has_defect = len(boxes) > 0
 
-        # =========================
-        # FILTRO CORRETO (ESSENCIAL)
-        # =========================
-        if results.boxes is not None:
-            for box in results.boxes:
-                confidence = float(box.conf[0])
+        overlay = img_bgr.copy()
 
-                # 🔥 THRESHOLD REAL DE DECISÃO
-                if confidence >= 0.45:
-                    has_defect = True
-                    valid_boxes.append(box)
+        if has_defect:
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                conf = float(box.conf[0])
 
-        # Desenha SOMENTE defeitos válidos
-        for box in valid_boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cv2.rectangle(
-                image,
-                (x1, y1),
-                (x2, y2),
-                (0, 0, 255),
-                2
+                pt1 = (int(x1), int(y1))
+                pt2 = (int(x2), int(y2))
+
+                # retângulo vermelho
+                cv2.rectangle(overlay, pt1, pt2, (0, 0, 255), 3)
+
+                # rótulo opcional
+                label = f"Defeito ({conf:.2f})"
+                cv2.putText(
+                    overlay,
+                    label,
+                    (pt1[0], max(pt1[1] - 10, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            message = "Defeito detectado no tecido."
+        else:
+            message = "Nenhum defeito detectado."
+            # opcional: moldura verde indicando ok
+            h, w = overlay.shape[:2]
+            cv2.rectangle(overlay, (10, 10), (w - 10, h - 10), (0, 255, 0), 3)
+            cv2.putText(
+                overlay,
+                "SEM DEFEITO",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
             )
 
-        # Converte imagem para base64
-        success, buffer = cv2.imencode(".png", image)
-        if not success:
-            raise HTTPException(status_code=500, detail="Erro ao gerar imagem")
+        # 3) Converter pra base64
+        img_b64 = cv2_to_base64(overlay)
 
-        image_base64 = base64.b64encode(buffer).decode("utf-8")
-
-        return {
-            "has_defect": has_defect,
-            "num_detections": len(valid_boxes),
-            "heatmap_base64": image_base64
-        }
+        return JSONResponse(
+            {
+                "has_defect": has_defect,
+                "message": message,
+                "image_base64": img_b64,
+            }
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print("Erro em /scan:", e)
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
