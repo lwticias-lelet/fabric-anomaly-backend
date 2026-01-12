@@ -1,9 +1,9 @@
-# backend/main.py
+
 
 import io
 import os
 import base64
-from typing import Tuple
+from typing import Tuple, List
 
 import cv2
 import numpy as np
@@ -25,13 +25,18 @@ MODEL_PATH = os.path.join(
 
 DEVICE = "cpu"
 
-print(f"Carregando modelo YOLO em {DEVICE} a partir de {MODEL_PATH}...")
+print(f"[BOOT] Carregando modelo YOLO em {DEVICE} a partir de {MODEL_PATH}...")
 
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Arquivo de modelo não encontrado em: {MODEL_PATH}")
 
 model = YOLO(MODEL_PATH)
 model.to(DEVICE)
+
+# Limiar de decisão (bem sensível)
+CONF_THRESHOLD = 0.08   # antes estava ~0.35
+IOU_THRESHOLD = 0.3
+
 
 # ================================
 # FASTAPI APP
@@ -41,7 +46,7 @@ app = FastAPI(title="Fabric Anomaly Scanner - YOLO")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # em produção você pode restringir
+    allow_origins=["*"],   # em produção pode restringir
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,9 +55,6 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    """
-    Rota raiz, usada pelo Render/Vercel para testar se o serviço está no ar.
-    """
     return {
         "status": "ok",
         "message": "Backend Fabric Anomaly Scanner (YOLO) rodando. Use /health ou POST /scan."
@@ -61,9 +63,6 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """
-    Endpoint simples de saúde da aplicação.
-    """
     return {"status": "ok"}
 
 
@@ -71,25 +70,30 @@ async def health():
 # FUNÇÃO AUXILIAR DE INFERÊNCIA
 # ================================
 
-def run_inference(image_bytes: bytes) -> Tuple[bool, str]:
+def run_inference(image_bytes: bytes) -> Tuple[bool, str, List[dict]]:
     """
     Roda o modelo YOLO na imagem enviada e devolve:
       - has_defect: bool
-      - image_b64: imagem anotada (com bounding boxes) em base64
+      - image_b64: imagem anotada (com bounding boxes)
+      - detections_info: lista com info das detecções (p/ debug se quiser)
     """
 
-    # Abrir imagem com PIL
+    # Abrir imagem com PIL (RGB)
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img_np = np.array(image)  # RGB
 
     # Copiar para desenhar overlays usando OpenCV (BGR)
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-    # Rodar YOLO
-    results = model(
-        img_np,
+    # ------------------------------
+    # YOLO PREDICT (mais sensível)
+    # ------------------------------
+    results = model.predict(
+        source=img_np,
         imgsz=640,
-        conf=0.35,       # limiar de confiança
+        conf=CONF_THRESHOLD,
+        iou=IOU_THRESHOLD,
+        device=DEVICE,
         verbose=False
     )
 
@@ -97,51 +101,68 @@ def run_inference(image_bytes: bytes) -> Tuple[bool, str]:
     boxes = result.boxes
 
     has_defect = False
+    detections_info = []
 
     if boxes is not None and len(boxes) > 0:
-        has_defect = True
-
         for box in boxes:
-            # Coordenadas da caixa
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             conf = float(box.conf[0])
 
-            # Desenhar retângulo vermelho
-            cv2.rectangle(
-                img_bgr,
-                (int(x1), int(y1)),
-                (int(x2), int(y2)),
-                (0, 0, 255),    # BGR (vermelho)
-                3               # espessura
+            detections_info.append(
+                {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "conf": conf,
+                }
             )
 
-            # Opcional: escrever confiança acima da caixa
-            label = f"{conf:.2f}"
-            cv2.putText(
-                img_bgr,
-                label,
-                (int(x1), max(int(y1) - 10, 0)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA
-            )
+        # Se pelo menos UMA detecção com confiança >= CONF_THRESHOLD existir, consideramos defeito
+        if any(det["conf"] >= CONF_THRESHOLD for det in detections_info):
+            has_defect = True
+
+            # Desenhar retângulos para todas as detecções válidas
+            for det in detections_info:
+                x1 = int(det["x1"])
+                y1 = int(det["y1"])
+                x2 = int(det["x2"])
+                y2 = int(det["y2"])
+
+                # Retângulo vermelho
+                cv2.rectangle(
+                    img_bgr,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 0, 255),  # BGR (vermelho)
+                    3
+                )
+
+                # Opcional: confiança
+                label = f"{det['conf']:.2f}"
+                cv2.putText(
+                    img_bgr,
+                    label,
+                    (x1, max(y1 - 10, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA
+                )
 
     # Converter de volta para RGB antes de salvar
     img_rgb_out = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil_out = Image.fromarray(img_rgb_out)
 
-    # Converter para JPEG em memória
     buffer = io.BytesIO()
-    pil_out.save(buffer, format="JPEG")
+    pil_out.save(buffer, format="JPEG", quality=90)
     buffer.seek(0)
-    img_bytes = buffer.read()
+    img_bytes_out = buffer.read()
 
-    # Converter para base64
-    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    img_b64 = base64.b64encode(img_bytes_out).decode("utf-8")
 
-    return has_defect, img_b64
+    return has_defect, img_b64, detections_info
 
 
 # ================================
@@ -154,11 +175,12 @@ async def scan(file: UploadFile = File(...)):
     Recebe uma imagem (frame da câmera), roda YOLO e devolve:
       - has_defect: bool
       - message: texto em PT-BR
-      - image_base64: imagem anotada (com retângulos vermelhos)
+      - image_base64: imagem anotada
+      - debug (opcional): quantas detecções e confianças (ajuda pra testar)
     """
     try:
         content = await file.read()
-        has_defect, img_b64 = run_inference(content)
+        has_defect, img_b64, detections_info = run_inference(content)
 
         if has_defect:
             msg = "Defeito detectado no tecido."
@@ -168,13 +190,14 @@ async def scan(file: UploadFile = File(...)):
         return {
             "has_defect": has_defect,
             "message": msg,
-            "image_base64": img_b64
+            "image_base64": img_b64,
+            "detections": detections_info  # útil pra debugar no Insomnia/Postman
         }
 
     except Exception as e:
-        # Em produção você pode logar o erro
         return {
             "has_defect": False,
             "message": f"Erro ao processar imagem: {str(e)}",
-            "image_base64": None
+            "image_base64": None,
+            "detections": []
         }
