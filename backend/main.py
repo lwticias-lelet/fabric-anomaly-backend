@@ -1,86 +1,120 @@
-from fastapi import FastAPI, UploadFile, File
+import os
+import io
+import base64
+
+import cv2
+import numpy as np
+from PIL import Image
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
-import torch
-import cv2
-import numpy as np
-from io import BytesIO
-from PIL import Image
-import base64
-import os
 
-app = FastAPI()
+# ============================================================
+# CONFIGURAÇÃO DA API
+# ============================================================
 
-# =======================
-# CORS – libera pro frontend
-# =======================
+app = FastAPI(title="Fabric Anomaly Scanner - YOLOv8")
+
+# CORS liberado (pode depois restringir para o domínio do Vercel)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # depois você pode limitar pro domínio da Vercel
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =======================
-# HEALTH CHECK (teste rápido)
-# =======================
-@app.get("/health")
-async def health():
-    return {"status": "ok", "message": "Backend vivo e respondendo."}
-
-# =======================
-# CARREGAR MODELO UMA VEZ
-# =======================
+# Caminho do modelo
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
+DEFAULT_MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
+MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Carregando modelo em {device} a partir de {MODEL_PATH}...")
+DEVICE = "cpu"
 
-model = YOLO(MODEL_PATH)  # YOLO v8
-# vamos passar `device` na inferência, não precisa .to()
+print(f"Carregando modelo em {DEVICE} a partir de {MODEL_PATH}...")
+model = YOLO(MODEL_PATH)
+print("✅ Modelo YOLO carregado com sucesso!")
+
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
 
 def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
-    """PIL -> OpenCV BGR."""
-    rgb = np.array(pil_image.convert("RGB"))
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    return bgr
+    """Converte PIL (RGB) para OpenCV (BGR)."""
+    arr = np.array(pil_image)
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
 
 def cv2_to_base64(img_bgr: np.ndarray) -> str:
-    """OpenCV BGR -> JPEG base64."""
-    ok, buffer = cv2.imencode(".jpg", img_bgr)
-    if not ok:
-        raise RuntimeError("Falha ao codificar imagem em JPEG.")
-    return base64.b64encode(buffer).decode("utf-8")
+    """Converte imagem OpenCV (BGR) em base64 (JPEG)."""
+    _, buffer = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    img_bytes = buffer.tobytes()
+    return base64.b64encode(img_bytes).decode("utf-8")
+
+
+# ============================================================
+# ROTAS
+# ============================================================
+
+@app.get("/")
+async def root():
+    """Rota raiz – só pra quando você abrir o link no navegador não dar 404."""
+    return {
+        "status": "ok",
+        "message": "Backend Fabric Anomaly Scanner rodando. Use /health ou POST /scan."
+    }
+
+
+@app.get("/health")
+async def health():
+    """Health check simples (usado pelo Render/Vercel)."""
+    return {"status": "ok"}
 
 
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
+    """
+    Recebe uma imagem, roda YOLOv8 e:
+
+    - Se encontrar qualquer bounding box -> has_defect = True
+    - Se não encontrar -> has_defect = False
+
+    Retorno:
+      - has_defect: bool
+      - message: str
+      - image_base64: imagem com overlay (retângulo vermelho ou moldura verde)
+    """
     try:
+        # -------------------------
         # 1) Ler imagem enviada
+        # -------------------------
         contents = await file.read()
-        pil_img = Image.open(BytesIO(contents)).convert("RGB")
+        pil_img = Image.open(io.BytesIO(contents)).convert("RGB")
         img_bgr = pil_to_cv2(pil_img)
 
+        # -------------------------
         # 2) Rodar YOLO
-        results = model(
-            img_bgr,
+        # -------------------------
+        results = model.predict(
+            source=img_bgr,
             imgsz=640,
-            conf=0.35,
+            conf=0.25,      # pode ajustar depois (0.1 - 0.3 se estiver muito cego)
             iou=0.45,
-            device=device,
-            verbose=False
+            device=DEVICE,
+            verbose=False,
         )
 
         result = results[0]
         boxes = result.boxes
-        has_defect = len(boxes) > 0
-
         overlay = img_bgr.copy()
 
-        if has_defect:
+        has_defect = False
+
+        if boxes is not None and len(boxes) > 0:
+            has_defect = True
+
             for box in boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 conf = float(box.conf[0])
@@ -88,10 +122,9 @@ async def scan_image(file: UploadFile = File(...)):
                 pt1 = (int(x1), int(y1))
                 pt2 = (int(x2), int(y2))
 
-                # retângulo vermelho
+                # Retângulo vermelho
                 cv2.rectangle(overlay, pt1, pt2, (0, 0, 255), 3)
 
-                # rótulo opcional
                 label = f"Defeito ({conf:.2f})"
                 cv2.putText(
                     overlay,
@@ -106,14 +139,15 @@ async def scan_image(file: UploadFile = File(...)):
 
             message = "Defeito detectado no tecido."
         else:
-            message = "Nenhum defeito detectado."
-            # opcional: moldura verde indicando ok
+            has_defect = False
+            message = "Nenhum defeito detectado no tecido."
+
             h, w = overlay.shape[:2]
             cv2.rectangle(overlay, (10, 10), (w - 10, h - 10), (0, 255, 0), 3)
             cv2.putText(
                 overlay,
                 "SEM DEFEITO",
-                (20, 40),
+                (20, 50),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
                 (0, 255, 0),
@@ -121,7 +155,9 @@ async def scan_image(file: UploadFile = File(...)):
                 cv2.LINE_AA,
             )
 
-        # 3) Converter pra base64
+        # -------------------------
+        # 3) Converter para base64
+        # -------------------------
         img_b64 = cv2_to_base64(overlay)
 
         return JSONResponse(
@@ -138,3 +174,16 @@ async def scan_image(file: UploadFile = File(...)):
             {"error": str(e)},
             status_code=500,
         )
+
+
+# ============================================================
+# RODAR LOCALMENTE
+# ============================================================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000)),
+        reload=True,
+    )
