@@ -1,4 +1,4 @@
-# backend/main.py
+# leticia, arrumar os limites e timeout de resposta do backend e comentar codigo
 
 import io
 import os
@@ -191,7 +191,7 @@ def run_inference(image_bytes: bytes) -> Tuple[bool, str, Optional[float], str]:
             if max_conf is None or conf > max_conf:
                 max_conf = conf
 
-            # Só consideramos como defeito se conf >= CONF_THRESHOLD
+            # Só consideramos como defeito se conf >= CONF_THRESHOLD kaline arrumar aqui amg
             if conf >= CONF_THRESHOLD:
                 has_defect = True
                 source = "yolo"
@@ -290,7 +290,7 @@ async def scan(file: UploadFile = File(...)):
         }
 
     except Exception as e:
-        # Em produção: logar o erro
+        
         return {
             "has_defect": False,
             "message": f"Erro ao processar imagem: {str(e)}",
